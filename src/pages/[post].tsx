@@ -4,13 +4,10 @@ import * as mysql from 'mysql2/promise'
 import {ConnectionOptions, RowDataPacket} from 'mysql2/promise'
 import {NextSeo} from 'next-seo'
 import * as React from 'react'
-import {type Pluggable} from 'unified'
 import {MDXRemote} from 'next-mdx-remote'
 import mdxComponents from '@/components/mdx'
-import rehypeHighlight from 'rehype-highlight'
 import 'highlight.js/styles/night-owl.css'
 import {serialize} from 'next-mdx-remote/serialize'
-import remarkGfm from 'remark-gfm'
 import {truncate} from 'lodash'
 import removeMarkdown from 'remove-markdown'
 import ReactMarkdown from 'react-markdown'
@@ -19,6 +16,8 @@ import Image from 'next/image'
 import Eggo from '@/components/icons/eggo'
 import Typesense from 'typesense'
 import {cn} from '@/ui/utils'
+import MuxPlayerElement from '@mux/mux-player'
+import {MaxResolution, MinResolution} from '@mux/playback-core'
 
 const access: ConnectionOptions = {
   uri: process.env.COURSE_BUILDER_DATABASE_URL,
@@ -67,12 +66,7 @@ SELECT *
   }
 }
 
-export const getStaticProps: GetServerSideProps = async function ({
-  req,
-  res,
-  params,
-  query,
-}) {
+export const getStaticProps: GetServerSideProps = async function ({params}) {
   if (!params?.post) {
     return {
       notFound: true,
@@ -219,19 +213,6 @@ export default function PostPage({
   const imageParams = new URLSearchParams()
   imageParams.set('title', post.fields.title)
 
-  const {mutate: markLessonComplete} =
-    trpc.progress.markLessonComplete.useMutation()
-
-  const playerProps = {
-    id: 'mux-player',
-    defaultHiddenCaptions: true,
-    streamType: 'on-demand',
-    thumbnailTime: 0,
-    playbackRates: [0.75, 1, 1.25, 1.5, 1.75, 2],
-    maxResolution: '2160p',
-    minResolution: '540p',
-  } as MuxPlayerProps
-
   return (
     <div>
       <NextSeo
@@ -270,16 +251,9 @@ export default function PostPage({
                   },
                 )}
               >
-                <MuxPlayer
-                  {...playerProps}
+                <PostPlayer
                   playbackId={videoResource.fields.muxPlaybackId}
-                  onEnded={() => {
-                    if (post.fields.eggheadLessonId) {
-                      markLessonComplete({
-                        lessonId: post.fields.eggheadLessonId,
-                      })
-                    }
-                  }}
+                  eggheadLessonId={post.fields.eggheadLessonId}
                 />
               </div>
             </div>
@@ -335,6 +309,73 @@ export default function PostPage({
         </main>
       </div>
     </div>
+  )
+}
+
+const defaultPlayerProps = {
+  id: 'mux-player',
+  defaultHiddenCaptions: true,
+  thumbnailTime: 0,
+  playbackRates: [0.75, 1, 1.25, 1.5, 1.75, 2],
+  maxResolution: MaxResolution.upTo2160p,
+  minResolution: MinResolution.noLessThan540p,
+}
+
+function PostPlayer({
+  playbackId,
+  eggheadLessonId,
+  playerProps = defaultPlayerProps,
+}: {
+  playbackId: string
+  eggheadLessonId?: number | null
+  playerProps?: MuxPlayerProps
+}) {
+  const [writingProgress, setWritingProgress] = React.useState<Boolean>(false)
+  const {mutate: markLessonComplete} =
+    trpc.progress.markLessonComplete.useMutation()
+
+  const {mutateAsync: addProgressToLesson} =
+    trpc.progress.addProgressToLesson.useMutation()
+
+  async function writeProgressToLesson({
+    currentTime,
+    lessonId,
+  }: {
+    currentTime?: number
+    lessonId?: number | null
+  }) {
+    const secondsWatched = Math.ceil(currentTime || 0)
+    const isSegment = secondsWatched % 30 === 0 && secondsWatched > 0
+    if (isSegment) {
+      return addProgressToLesson({
+        lessonId,
+        secondsWatched,
+      })
+    }
+  }
+
+  return (
+    <MuxPlayer
+      {...playerProps}
+      playbackId={playbackId}
+      onEnded={() => {
+        if (eggheadLessonId) {
+          markLessonComplete({
+            lessonId: eggheadLessonId,
+          })
+        }
+      }}
+      onTimeUpdate={async (e: any) => {
+        const muxPlayer = (e?.currentTarget as MuxPlayerElement) || null
+        if (!muxPlayer || writingProgress) return
+        setWritingProgress(true)
+        await writeProgressToLesson({
+          currentTime: muxPlayer.currentTime,
+          lessonId: eggheadLessonId,
+        })
+        setWritingProgress(false)
+      }}
+    />
   )
 }
 
